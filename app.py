@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import os
 import time
-import psycopg2
+import psycopg
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -113,4 +113,5 @@ def renew_license():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
