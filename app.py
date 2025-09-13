@@ -2,16 +2,22 @@
 import base64
 import hashlib
 import hmac
-import json
 import os
 import time
+import psycopg2
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"
-DB_FILE = "licenses.json"
+SECRET_KEY = b"bee3017930310eff1aceba855a4316e5073cd8333102212d8e64f0c3bf9bf69e"
 ADMIN_TOKEN = "supersecrettoken123"  # change before deploying
+
+# Database connection (Render gives DATABASE_URL as env var)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
 def generate_license(username: str) -> str:
@@ -21,21 +27,23 @@ def generate_license(username: str) -> str:
     return base64.urlsafe_b64encode(signature).decode().rstrip("=")
 
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_db(db):
-    with open(DB_FILE, "w") as f:
-        json.dump(db, f, indent=2)
+@app.before_first_request
+def init_db():
+    """Create table if it doesn’t exist"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS licenses (
+                    email TEXT PRIMARY KEY,
+                    license_key TEXT NOT NULL,
+                    expiry BIGINT NOT NULL
+                );
+            """)
+        conn.commit()
 
 
 @app.route("/api/check_license", methods=["GET"])
 def check_license():
-    """Verify license validity for a user"""
     email = request.args.get("email", "").strip().lower()
     license_key = request.args.get("key", "").strip()
 
@@ -46,17 +54,19 @@ def check_license():
     if not hmac.compare_digest(expected_key, license_key):
         return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
 
-    db = load_db()
-    expiry = db.get(email)
-    if not expiry:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT expiry FROM licenses WHERE email = %s", (email,))
+            row = cur.fetchone()
+
+    if not row:
         return jsonify({"status": "inactive", "message": "No active license"}), 404
 
+    expiry = row[0]
     now = int(time.time())
+
     if now > expiry:
-        return jsonify({
-            "status": "expired",
-            "expires_on": time.ctime(expiry)
-        }), 403
+        return jsonify({"status": "expired", "expires_on": time.ctime(expiry)}), 403
 
     remaining_days = int((expiry - now) / 86400)
     return jsonify({
@@ -68,7 +78,6 @@ def check_license():
 
 @app.route("/api/renew_license", methods=["POST"])
 def renew_license():
-    """Extend or create license (admin only)"""
     data = request.get_json(force=True)
     email = data.get("email", "").strip().lower()
     days = int(data.get("days", 30))
@@ -80,14 +89,24 @@ def renew_license():
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
 
-    db = load_db()
     expiry = int(time.time()) + days * 86400
-    db[email] = expiry
-    save_db(db)
+    license_key = generate_license(email)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO licenses (email, license_key, expiry)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (email) DO UPDATE
+                SET license_key = EXCLUDED.license_key,
+                    expiry = EXCLUDED.expiry
+            """, (email, license_key, expiry))
+        conn.commit()
 
     return jsonify({
         "status": "success",
         "email": email,
+        "license_key": license_key,
         "expires_on": time.ctime(expiry)
     })
 
