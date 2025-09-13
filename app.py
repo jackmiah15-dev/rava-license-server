@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-SECRET_KEY = b"bee3017930310eff1aceba855a4316e5073cd8333102212d8e64f0c3bf9bf69e"
+SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"
 ADMIN_TOKEN = "supersecrettoken123"  # change before deploying
 
 # Database connection (Render gives DATABASE_URL as env var)
@@ -113,3 +113,4 @@ def renew_license():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
