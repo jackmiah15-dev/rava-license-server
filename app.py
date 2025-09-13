@@ -1,4 +1,4 @@
-v# file: app.py
+# file: app.py
 import base64
 import hashlib
 import hmac
@@ -117,3 +117,4 @@ def renew_license():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
