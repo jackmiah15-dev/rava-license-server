@@ -1,4 +1,4 @@
-# file: app.py
+v# file: app.py
 import base64
 import hashlib
 import hmac
@@ -27,7 +27,6 @@ def generate_license(username: str) -> str:
     return base64.urlsafe_b64encode(signature).decode().rstrip("=")
 
 
-@app.before_first_request
 def init_db():
     """Create table if it doesn’t exist"""
     with get_db() as conn:
@@ -40,6 +39,11 @@ def init_db():
                 );
             """)
         conn.commit()
+
+
+# run DB init once at startup
+with app.app_context():
+    init_db()
 
 
 @app.route("/api/check_license", methods=["GET"])
@@ -113,7 +117,3 @@ def renew_license():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
-
-
