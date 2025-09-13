@@ -17,7 +17,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return psycopg.connect(DATABASE_URL, sslmode="require")
 
 
 def generate_license(username: str) -> str:
@@ -113,5 +113,6 @@ def renew_license():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
