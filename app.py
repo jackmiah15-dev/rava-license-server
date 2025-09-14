@@ -5,14 +5,20 @@ import hmac
 import os
 import time
 import psycopg
+import jwt
 from flask import Flask, request, jsonify
+from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
 # --- CONFIG ---
-SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"
-ADMIN_TOKEN = "supersecrettoken123"  # CHANGE before deploying!
+SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"   # for license key gen
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# JWT config
+JWT_SECRET = "WoGlKaNaAnJm06"   # CHANGE before production
+JWT_EXPIRY = 86400                 # 1 day
 
 
 # --- DB CONNECTION ---
@@ -51,14 +57,105 @@ def init_db():
                     created_at BIGINT NOT NULL
                 );
             """)
+            # admin_users table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    id SERIAL PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at BIGINT NOT NULL
+                );
+            """)
         conn.commit()
+
+
+# --- TEMPORARY ADMIN REGISTRATION ---
+@app.route("/api/admin/register", methods=["POST"])
+def admin_register():
+    """One-time: Create a new admin user. DELETE after use!"""
+    data = request.get_json(force=True)
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    token = data.get("token", "")
+
+    if token != ADMIN_TOKEN:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    if not email or not password:
+        return jsonify({"status": "error", "message": "Missing email or password"}), 400
+
+    password_hash = generate_password_hash(password)
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO admin_users (email, password_hash, created_at)
+                    VALUES (%s, %s, %s)
+                """, (email, password_hash, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+    return jsonify({"status": "success", "email": email})
 
 
 with app.app_context():
     init_db()
 
 
-# --- LICENSE CHECK ---
+# --- ADMIN AUTH HELPERS ---
+def require_admin(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"status": "error", "message": "Missing or invalid token"}), 401
+
+        token = auth_header.split(" ")[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            if payload.get("role") != "admin":
+                raise jwt.InvalidTokenError
+        except jwt.ExpiredSignatureError:
+            return jsonify({"status": "error", "message": "Token expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# --- ADMIN: LOGIN ---
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    data = request.get_json(force=True)
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if not email or not password:
+        return jsonify({"status": "error", "message": "Missing email or password"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT password_hash FROM admin_users WHERE email=%s", (email,))
+            row = cur.fetchone()
+
+    if not row or not check_password_hash(row[0], password):
+        return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+    # generate JWT
+    payload = {
+        "email": email,
+        "role": "admin",
+        "exp": int(time.time()) + JWT_EXPIRY
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+    return jsonify({"status": "success", "token": token})
+
+
+# --- LICENSE CHECK (user side) ---
 @app.route("/api/check_license", methods=["GET"])
 def check_license():
     email = request.args.get("email", "").strip().lower()
@@ -93,7 +190,7 @@ def check_license():
     })
 
 
-# --- MARK PAYMENT PENDING (User clicks “I have paid”) ---
+# --- USER: MARK PAYMENT PENDING ---
 @app.route("/api/mark_payment_pending", methods=["POST"])
 def mark_payment_pending():
     """Record a pending payment attempt"""
@@ -115,18 +212,31 @@ def mark_payment_pending():
     return jsonify({"status": "pending", "email": email, "plan": plan})
 
 
-# --- ADMIN APPROVES PAYMENT & ISSUES LICENSE ---
+# --- ADMIN: GET PENDING PAYMENTS ---
+@app.route("/api/pending_payments", methods=["GET"])
+@require_admin
+def pending_payments():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, email, plan, status, created_at FROM payments WHERE status='pending'")
+            rows = cur.fetchall()
+
+    payments = [
+        {"id": r[0], "email": r[1], "plan": r[2], "status": r[3], "created_at": r[4]}
+        for r in rows
+    ]
+    return jsonify({"status": "success", "payments": payments})
+
+
+# --- ADMIN: APPROVE PAYMENT & ISSUE LICENSE ---
 @app.route("/api/approve_payment", methods=["POST"])
+@require_admin
 def approve_payment():
     """Admin approves a payment and issues a license"""
     data = request.get_json(force=True)
     email = data.get("email", "").strip().lower()
     plan = data.get("plan", "").strip().lower()
     days = int(data.get("days", 30))
-    token = data.get("token", "")
-
-    if token != ADMIN_TOKEN:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     if not email or not plan:
         return jsonify({"status": "error", "message": "Missing email or plan"}), 400
@@ -168,16 +278,13 @@ def approve_payment():
     })
 
 
-# --- MANUAL ADMIN RENEW (still useful for extensions) ---
+# --- ADMIN: MANUAL LICENSE RENEW ---
 @app.route("/api/renew_license", methods=["POST"])
+@require_admin
 def renew_license():
     data = request.get_json(force=True)
     email = data.get("email", "").strip().lower()
     days = int(data.get("days", 30))
-    token = data.get("token", "")
-
-    if token != ADMIN_TOKEN:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
