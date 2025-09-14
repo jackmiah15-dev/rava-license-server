@@ -17,9 +17,11 @@ SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"   # for license key 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # JWT config
-JWT_SECRET = "WoGlKaNaAnJm06"   # CHANGE before production
-JWT_EXPIRY = 86400                 # 1 day
+JWT_SECRET = os.getenv("JWT_SECRET", "WoGlKaNaAnJm06")   # CHANGE before production
+JWT_EXPIRY = 86400  # 1 day
 
+# Bootstrap token used *only* for initial admin registration
+ADMIN_TOKEN = os.getenv("ADMIN_BOOTSTRAP_TOKEN", "supersecrettoken123")
 
 # --- DB CONNECTION ---
 def get_db():
@@ -314,3 +316,4 @@ def renew_license():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
