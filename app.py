@@ -354,6 +354,31 @@ def renew_license():
         "days_remaining": remaining_days
     })
 
+# --- ADMIN: VIEW ALL ACTIVE USERS ---
+@app.route("/api/all_users", methods=["GET"])
+@require_admin
+def all_users():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT email, license_key, expiry
+                FROM licenses
+                ORDER BY expiry DESC
+            """)
+            rows = cur.fetchall()
+
+    users = [
+        {
+            "email": r[0],
+            "license_key": r[1],
+            "expiry_timestamp": r[2],
+            "expires_on": time.ctime(r[2]),
+            "days_remaining": int((r[2] - int(time.time())) / 86400)
+        }
+        for r in rows
+    ]
+
+    return jsonify({"status": "success", "users": users})
 
 # --- ADMIN DASHBOARD STATIC PAGE ---
 @app.route("/admin")
@@ -364,3 +389,4 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
