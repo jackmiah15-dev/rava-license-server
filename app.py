@@ -195,9 +195,10 @@ def check_license():
                 remaining_days = int((expiry - now) / 86400)
                 return jsonify({
                     "status": "valid",
+                    "email": email,
                     "license_key": db_license,
                     "expires_on": time.ctime(expiry),
-                    "days_remaining": remaining_days
+                    "days_remaining": int((expiry - now) / 86400)
                 })
 
             # If no license, check payments table
@@ -382,6 +383,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
