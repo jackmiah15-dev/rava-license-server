@@ -280,7 +280,7 @@ def approve_payment():
         "expires_on": time.ctime(expiry)
     })
 @app.route("/api/reject_payment", methods=["POST"])
-@admin_required
+@require_admin
 def reject_payment():
     """Admin rejects a pending payment"""
     data = request.get_json(force=True)
@@ -350,6 +350,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
