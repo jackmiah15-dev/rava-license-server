@@ -6,7 +6,7 @@ import os
 import time
 import psycopg
 import jwt
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -76,37 +76,6 @@ def init_db():
         conn.commit()
 
 
-# --- TEMPORARY ADMIN REGISTRATION ---
-# @app.route("/api/admin/register", methods=["POST"])
-# def admin_register():
-  #  """One-time: Create a new admin user. DELETE after use!"""
-   # data = request.get_json(force=True)
-  #  email = data.get("email", "").strip().lower()
- #   password = data.get("password", "")
- #   token = data.get("token", "")
-
-#    if token != ADMIN_TOKEN:
- #       return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
-#    if not email or not password:
- #       return jsonify({"status": "error", "message": "Missing email or password"}), 400
-
-#    password_hash = generate_password_hash(password)
-
- #   try:
- #       with get_db() as conn:
- #           with conn.cursor() as cur:
- #               cur.execute("""
- #                   INSERT INTO admin_users (email, password_hash, created_at)
-#                    VALUES (%s, %s, %s)
- #               """, (email, password_hash, int(time.time())))
-  #          conn.commit()
- #   except Exception as e:
- #       return jsonify({"status": "error", "message": str(e)}), 400
-
-  #  return jsonify({"status": "success", "email": email})
-
-
 with app.app_context():
     init_db()
 
@@ -162,10 +131,22 @@ def admin_login():
     return jsonify({"status": "success", "token": token})
 
 
+# --- ADMIN: VERIFY TOKEN ---
+@app.route("/api/admin/verify", methods=["GET"])
+@require_admin
+def admin_verify():
+    """Verify that the current admin token is still valid"""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.split(" ")[1]
+    payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    return jsonify({"status": "success", "email": payload["email"]})
+
+
 # --- LICENSE CHECK (user side) ---
 @app.route("/api/check_license", methods=["GET"])
 def check_license():
     email = request.args.get("email", "").strip().lower()
+    license_key = request.args.get("key", "").strip()
 
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
@@ -197,7 +178,7 @@ def check_license():
                     "email": email,
                     "license_key": db_license,
                     "expires_on": time.ctime(expiry),
-                    "days_remaining": int((expiry - now) / 86400)
+                    "days_remaining": remaining_days
                 })
 
             # If no license, check payments table
@@ -211,8 +192,6 @@ def check_license():
 
     # Default fallback
     return jsonify({"status": "inactive", "message": "No license or payment found"}), 404
-
-
 
 
 # --- USER: MARK PAYMENT PENDING ---
@@ -306,6 +285,8 @@ def approve_payment():
         "days_remaining": remaining_days
     })
 
+
+# --- ADMIN: REJECT PAYMENT ---
 @app.route("/api/reject_payment", methods=["POST"])
 @require_admin
 def reject_payment():
@@ -374,22 +355,12 @@ def renew_license():
     })
 
 
-from flask import send_from_directory
-
+# --- ADMIN DASHBOARD STATIC PAGE ---
 @app.route("/admin")
 def admin_page():
     return send_from_directory("static", "admin.html")
+
+
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
-
-
-
-
-
-
-
-
-
