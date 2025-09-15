@@ -72,34 +72,34 @@ def init_db():
 
 
 # --- TEMPORARY ADMIN REGISTRATION ---
-@app.route("/api/admin/register", methods=["POST"])
-def admin_register():
-    """One-time: Create a new admin user. DELETE after use!"""
-    data = request.get_json(force=True)
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
-    token = data.get("token", "")
+# @app.route("/api/admin/register", methods=["POST"])
+# def admin_register():
+  #  """One-time: Create a new admin user. DELETE after use!"""
+   # data = request.get_json(force=True)
+  #  email = data.get("email", "").strip().lower()
+ #   password = data.get("password", "")
+ #   token = data.get("token", "")
 
-    if token != ADMIN_TOKEN:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+#    if token != ADMIN_TOKEN:
+ #       return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
-    if not email or not password:
-        return jsonify({"status": "error", "message": "Missing email or password"}), 400
+#    if not email or not password:
+ #       return jsonify({"status": "error", "message": "Missing email or password"}), 400
 
-    password_hash = generate_password_hash(password)
+#    password_hash = generate_password_hash(password)
 
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO admin_users (email, password_hash, created_at)
-                    VALUES (%s, %s, %s)
-                """, (email, password_hash, int(time.time())))
-            conn.commit()
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+ #   try:
+ #       with get_db() as conn:
+ #           with conn.cursor() as cur:
+ #               cur.execute("""
+ #                   INSERT INTO admin_users (email, password_hash, created_at)
+#                    VALUES (%s, %s, %s)
+ #               """, (email, password_hash, int(time.time())))
+  #          conn.commit()
+ #   except Exception as e:
+ #       return jsonify({"status": "error", "message": str(e)}), 400
 
-    return jsonify({"status": "success", "email": email})
+  #  return jsonify({"status": "success", "email": email})
 
 
 with app.app_context():
@@ -316,4 +316,5 @@ def renew_license():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
