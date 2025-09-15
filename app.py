@@ -171,21 +171,21 @@ def check_license():
     if not email or not license_key:
         return jsonify({"status": "error", "message": "Missing email or key"}), 400
 
-    expected_key = generate_license(email)
-    if not hmac.compare_digest(expected_key, license_key):
-        return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
-
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT expiry FROM licenses WHERE email = %s", (email,))
+            cur.execute("SELECT license_key, expiry FROM licenses WHERE email = %s", (email,))
             row = cur.fetchone()
 
     if not row:
         return jsonify({"status": "inactive", "message": "No active license"}), 404
 
-    expiry = row[0]
-    now = int(time.time())
+    db_license, expiry = row
 
+    # Now check key against what’s stored in DB
+    if not hmac.compare_digest(db_license, license_key):
+        return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
+
+    now = int(time.time())
     if now > expiry:
         return jsonify({"status": "expired", "expires_on": time.ctime(expiry)}), 403
 
@@ -195,6 +195,7 @@ def check_license():
         "expires_on": time.ctime(expiry),
         "days_remaining": remaining_days
     })
+
 
 
 # --- USER: MARK PAYMENT PENDING ---
@@ -354,6 +355,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
