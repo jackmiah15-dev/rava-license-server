@@ -277,13 +277,18 @@ def approve_payment():
 
         conn.commit()
 
+    remaining_days = int((expiry - int(time.time())) / 86400)
+
     return jsonify({
         "status": "approved",
         "email": email,
         "plan": plan,
         "license_key": license_key,
-        "expires_on": time.ctime(expiry)
+        "expires_on": time.ctime(expiry),
+        "expiry_timestamp": expiry,
+        "days_remaining": remaining_days
     })
+
 @app.route("/api/reject_payment", methods=["POST"])
 @require_admin
 def reject_payment():
@@ -340,12 +345,17 @@ def renew_license():
             """, (email, license_key, expiry))
         conn.commit()
 
+    remaining_days = int((expiry - int(time.time())) / 86400)
+
     return jsonify({
-        "status": "success",
+        "status": "renewed",
         "email": email,
         "license_key": license_key,
-        "expires_on": time.ctime(expiry)
+        "expires_on": time.ctime(expiry),
+        "expiry_timestamp": expiry,
+        "days_remaining": remaining_days
     })
+
 
 from flask import send_from_directory
 
@@ -355,6 +365,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
