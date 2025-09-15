@@ -7,11 +7,15 @@ import time
 import psycopg
 import jwt
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
 app = Flask(__name__)
+
+# Allow CORS from your Netlify frontend
+CORS(app, resources={r"/api/*": {"origins": "https://rava-ai-trader.netlify.app"}})
 
 # --- CONFIG ---
 SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"   # for license key gen
@@ -350,6 +354,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
