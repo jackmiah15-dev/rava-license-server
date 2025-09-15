@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Admin Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .hidden { display: none; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background: #f2f2f2; }
+    button { margin: 2px; padding: 5px 10px; }
+  </style>
+</head>
+<body>
+  <h1>Admin Dashboard</h1>
+
+  <!-- Login form -->
+  <div id="login-section">
+    <h2>Login</h2>
+    <input type="email" id="email" placeholder="Email"><br><br>
+    <input type="password" id="password" placeholder="Password"><br><br>
+    <button onclick="login()">Login</button>
+    <p id="login-message"></p>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard-section" class="hidden">
+    <button onclick="logout()">Logout</button>
+    <h2>Pending Payments</h2>
+    <table id="payments-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Email</th>
+          <th>Plan</th>
+          <th>Created At</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+    const API_BASE = "https://rava-license-server.onrender.com/api";
+
+    // --- LOGIN ---
+    async function login() {
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+
+      const res = await fetch(`${API_BASE}/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+
+      if (data.status === "success") {
+        localStorage.setItem("adminToken", data.token);
+        document.getElementById("login-section").classList.add("hidden");
+        document.getElementById("dashboard-section").classList.remove("hidden");
+        loadPayments();
+      } else {
+        document.getElementById("login-message").innerText = data.message || "Login failed";
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem("adminToken");
+      document.getElementById("dashboard-section").classList.add("hidden");
+      document.getElementById("login-section").classList.remove("hidden");
+    }
+
+    // --- LOAD PENDING PAYMENTS ---
+    async function loadPayments() {
+      const token = localStorage.getItem("adminToken");
+      const res = await fetch(`${API_BASE}/pending_payments`, {
+        headers: { "Authorization": "Bearer " + token }
+      });
+      const data = await res.json();
+
+      const tbody = document.querySelector("#payments-table tbody");
+      tbody.innerHTML = "";
+
+      if (data.status === "success") {
+        data.payments.forEach(p => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${p.id}</td>
+            <td>${p.email}</td>
+            <td>${p.plan}</td>
+            <td>${new Date(p.created_at * 1000).toLocaleString()}</td>
+            <td>
+              <button onclick="approve('${p.email}', '${p.plan}')">Approve</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } else {
+        tbody.innerHTML = `<tr><td colspan="5">${data.message || "Error loading payments"}</td></tr>`;
+      }
+    }
+
+    // --- APPROVE PAYMENT ---
+    async function approve(email, plan) {
+      const token = localStorage.getItem("adminToken");
+      const days = prompt("Enter number of days for license (default 30)", "30");
+      if (!days) return;
+
+      const res = await fetch(`${API_BASE}/approve_payment`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + token
+        },
+        body: JSON.stringify({ email, plan, days: parseInt(days) })
+      });
+      const data = await res.json();
+
+      alert(JSON.stringify(data, null, 2));
+      loadPayments();
+    }
+
+    // --- AUTO LOGIN IF TOKEN EXISTS ---
+    if (localStorage.getItem("adminToken")) {
+      document.getElementById("login-section").classList.add("hidden");
+      document.getElementById("dashboard-section").classList.remove("hidden");
+      loadPayments();
+    }
+  </script>
+</body>
+</html>
