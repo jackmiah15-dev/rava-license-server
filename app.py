@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
+
 app = Flask(__name__)
 
 # --- CONFIG ---
@@ -341,10 +342,15 @@ def renew_license():
         "expires_on": time.ctime(expiry)
     })
 
+from flask import send_from_directory
 
+@app.route("/admin")
+def admin_page():
+    return send_from_directory("static", "admin.html")
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
