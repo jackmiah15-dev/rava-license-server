@@ -166,7 +166,6 @@ def admin_login():
 @app.route("/api/check_license", methods=["GET"])
 def check_license():
     email = request.args.get("email", "").strip().lower()
-    license_key = request.args.get("key", "").strip()
 
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
@@ -383,6 +382,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
