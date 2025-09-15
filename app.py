@@ -278,6 +278,35 @@ def approve_payment():
         "license_key": license_key,
         "expires_on": time.ctime(expiry)
     })
+@app.route("/api/reject_payment", methods=["POST"])
+@admin_required
+def reject_payment():
+    """Admin rejects a pending payment"""
+    data = request.get_json(force=True)
+    payment_id = data.get("id")
+
+    if not payment_id:
+        return jsonify({"status": "error", "message": "Missing payment ID"}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE payments
+                SET status='rejected'
+                WHERE id=%s AND status='pending'
+                RETURNING id
+            """, (payment_id,))
+            row = cur.fetchone()
+
+            if not row:
+                return jsonify({"status": "error", "message": "No pending payment found"}), 404
+
+        conn.commit()
+
+    return jsonify({
+        "status": "success",
+        "message": f"Payment {payment_id} rejected"
+    })
 
 
 # --- ADMIN: MANUAL LICENSE RENEW ---
@@ -316,5 +345,6 @@ def renew_license():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
