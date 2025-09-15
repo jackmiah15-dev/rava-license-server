@@ -3,3 +3,4 @@ flask==2.3.3
 gunicorn==21.2.0
 psycopg[binary]==3.2.10
 PyJWT==2.8.0
+flask_cors
