@@ -158,19 +158,19 @@ def check_license():
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            # First check if license exists
             cur.execute("SELECT license_key, expiry FROM licenses WHERE email = %s", (email,))
             row = cur.fetchone()
 
             if row:
                 db_license, expiry = row
-
-                # Check provided key
-                if not license_key or not hmac.compare_digest(db_license, license_key):
-                    return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
-
-                # Check expiry
                 now = int(time.time())
+
+                # ✅ If a key was passed, validate it
+                if license_key:
+                    if not hmac.compare_digest(db_license, license_key):
+                        return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
+
+                # ✅ Expiry check
                 if now > expiry:
                     return jsonify({
                         "status": "expired",
@@ -186,7 +186,7 @@ def check_license():
                     "days_remaining": remaining_days
                 })
 
-            # If no license, check payments table
+            # No license? → check payments table
             cur.execute("SELECT status FROM payments WHERE email=%s ORDER BY id DESC LIMIT 1", (email,))
             pay = cur.fetchone()
             if pay:
@@ -195,8 +195,8 @@ def check_license():
                 elif pay[0] == "rejected":
                     return jsonify({"status": "rejected"})
 
-    # Default fallback
     return jsonify({"status": "inactive", "message": "No license or payment found"}), 404
+
 
 
 # --- USER: MARK PAYMENT PENDING ---
@@ -394,6 +394,7 @@ def admin_page():
 # --- MAIN ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
