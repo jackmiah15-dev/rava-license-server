@@ -43,6 +43,7 @@
               <th>ID</th>
               <th>Email</th>
               <th>Plan</th>
+              <th>TXID</th>
               <th>Created At</th>
               <th>License Days</th>
               <th>Action</th>
@@ -137,56 +138,51 @@
       }
     }
 
-    // --- LOAD PENDING PAYMENTS ---
-    async function loadPayments() {
-      const token = localStorage.getItem("adminToken");
-      const tbody = document.querySelector("#payments-table tbody");
-      tbody.innerHTML = `<tr><td colspan="6" class="text-center">Loading...</td></tr>`;
-
-      try {
-        const res = await fetch(`${API_BASE}/pending_payments`, {
-          headers: { "Authorization": "Bearer " + token }
+   // --- LOAD PENDING PAYMENTS ---
+  async function loadPayments() {
+    const token = localStorage.getItem("adminToken");
+    const tbody = document.querySelector("#payments-table tbody");
+    tbody.innerHTML = `<tr><td colspan="7" class="text-center">Loading...</td></tr>`;
+  
+    try {
+      const res = await fetch(`${API_BASE}/pending_payments`, {
+        headers: { "Authorization": "Bearer " + token }
+      });
+      const data = await res.json();
+  
+      tbody.innerHTML = "";
+  
+      if (data.status === "success" && data.payments.length > 0) {
+        data.payments.forEach(p => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${p.id}</td>
+            <td>${p.email}</td>
+            <td>${p.plan}</td>
+            <td><code>${p.txid || "N/A"}</code></td>
+            <td>${new Date(p.created_at * 1000).toLocaleString()}</td>
+            <td>
+              <select id="days-${p.id}" class="form-select form-select-sm">
+                <option value="30" selected>30 days</option>
+                <option value="90">90 days</option>
+                <option value="180">180 days</option>
+              </select>
+            </td>
+            <td>
+              <button class="btn btn-success btn-sm" onclick="approve('${p.email}', '${p.plan}', ${p.id})">Approve</button>
+              <button class="btn btn-danger btn-sm" onclick="reject('${p.id}')">Reject</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
         });
-        const data = await res.json();
-
-        tbody.innerHTML = "";
-
-        if (data.status === "success" && data.payments.length > 0) {
-          data.payments.forEach(p => {
-            const tr = document.createElement("tr");
-
-            const emailTd = document.createElement("td");
-            emailTd.textContent = p.email;
-
-            const planTd = document.createElement("td");
-            planTd.textContent = p.plan;
-
-            tr.innerHTML = `<td>${p.id}</td>`;
-            tr.appendChild(emailTd);
-            tr.appendChild(planTd);
-            tr.innerHTML += `
-              <td>${new Date(p.created_at * 1000).toLocaleString()}</td>
-              <td>
-                <select id="days-${p.id}" class="form-select form-select-sm">
-                  <option value="30" selected>30 days</option>
-                  <option value="90">90 days</option>
-                  <option value="180">180 days</option>
-                </select>
-              </td>
-              <td>
-                <button class="btn btn-success btn-sm" onclick="approve('${p.email}', '${p.plan}', ${p.id})">Approve</button>
-                <button class="btn btn-danger btn-sm" onclick="reject('${p.id}')">Reject</button>
-              </td>
-            `;
-            tbody.appendChild(tr);
-          });
-        } else {
-          tbody.innerHTML = `<tr><td colspan="6" class="text-center">${data.message || "No pending payments"}</td></tr>`;
-        }
-      } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger">Failed to load payments</td></tr>`;
+      } else {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-center">${data.message || "No pending payments"}</td></tr>`;
       }
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Failed to load payments</td></tr>`;
     }
+  }
+
 
     // --- LOAD ACTIVE USERS ---
     async function loadUsers() {
@@ -275,3 +271,4 @@
   </script>
 </body>
 </html>
+
