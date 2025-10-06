@@ -1,404 +1,783 @@
-# file: app.py
+from __future__ import annotations
+import asyncio
 import base64
+import dataclasses
 import hashlib
 import hmac
+import json
+import logging
 import os
+import queue
+import signal
+import sys
+import tempfile
+import threading
 import time
-import psycopg
-import jwt
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from functools import wraps
-from werkzeug.security import generate_password_hash, check_password_hash
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+import contextlib
 
 
-app = Flask(__name__)
+# --- Third-party (must be installed) ---
+# pip install PyQt5 psutil pystray pillow iqoptionapi
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
+    QPushButton, QComboBox, QMessageBox, QHBoxLayout
+)
+import psutil
+from PIL import Image, ImageDraw
+import pystray
 
-# Allow CORS from your Netlify frontend
-CORS(app, resources={r"/api/*": {
-    "origins": ["https://rava-ai-trader.netlify.app"],
-    "methods": ["GET", "POST", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization"]
-}})
+# --- Broker libs (user-provided) ---
+# Ensure these are installed/available in the environment/executable.
+try:
+    from iqoptionapi.stable_api import IQ_Option
+except Exception:
+    IQ_Option = None  # Avoid crash at import; fail later with clear message.
 
+try:
+    from ejtraderIQ import IQOption as EJ_IQOption
+except Exception:
+    EJ_IQOption = None
 
-# --- CONFIG ---
-SECRET_KEY = b"JXGjfZvXXyt74SuTlBRodp_j-JmfrOd-wZjudTxmGOI"   # for license key gen
-DATABASE_URL = os.getenv("DATABASE_URL")
+# ========== Paths & Config ==========
 
-# JWT config
-JWT_SECRET = os.getenv("JWT_SECRET", "WoGlKaNaAnJm06")   # CHANGE before production
-JWT_EXPIRY = 86400  # 1 day
-
-# Bootstrap token used *only* for initial admin registration
-ADMIN_TOKEN = os.getenv("ADMIN_BOOTSTRAP_TOKEN", "supersecrettoken123")
-
-# --- DB CONNECTION ---
-def get_db():
-    return psycopg.connect(DATABASE_URL, sslmode="require")
-
-
-# --- LICENSE KEY GENERATOR ---
-def generate_license(username: str) -> str:
-    """Generate license key from username/email"""
-    username_bytes = username.strip().lower().encode()
-    signature = hmac.new(SECRET_KEY, username_bytes, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(signature).decode().rstrip("=")
-
-
-# --- DB INIT ---
-def init_db():
-    """Create tables if they don’t exist"""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            # licenses table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS licenses (
-                    email TEXT PRIMARY KEY,
-                    license_key TEXT NOT NULL,
-                    expiry BIGINT NOT NULL
-                );
-            """)
-            # payments table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS payments (
-                    id SERIAL PRIMARY KEY,
-                    email TEXT NOT NULL,
-                    plan TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at BIGINT NOT NULL
-                );
-            """)
-            # admin_users table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS admin_users (
-                    id SERIAL PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at BIGINT NOT NULL
-                );
-            """)
-        conn.commit()
+def get_app_dirs() -> Tuple[Path, Path]:
+    """Return (config_dir, log_dir) in a canonical, per-user location."""
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        root = base / "Rava"
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support" / "Rava"
+    else:
+        root = Path.home() / ".config" / "rava"
+    cfg = root
+    logs = root / "logs"
+    cfg.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
+    return cfg, logs
 
 
-with app.app_context():
-    init_db()
+CONFIG_DIR, LOG_DIR = get_app_dirs()
+CONFIG_FILE = CONFIG_DIR / "config.json"
+LOCK_FILE = Path(tempfile.gettempdir()) / "rava.lock"
+LOG_FILE = LOG_DIR / f"rava_{datetime.now():%Y-%m-%d}.log"
 
 
-# --- ADMIN AUTH HELPERS ---
-def require_admin(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"status": "error", "message": "Missing or invalid token"}), 401
+@dataclass
+class RavaConfig:
+    username: str
+    password: str
+    account_type: str  # PRACTICE | REAL
+    start_amount: float
+    profit_ratio: float
+    asset: str
+    license_key: str = ""
 
-        token = auth_header.split(" ")[1]
+    def validate(self) -> None:
+        """Raise ValueError on invalid input. Keeps GUI & bot aligned."""
+        acct = self.account_type.strip().upper()
+        if acct not in {"PRACTICE", "REAL"}:
+            raise ValueError("Account Type must be PRACTICE or REAL.")
+        if not self.username.strip() or not self.password:
+            raise ValueError("Username and Password are required.")
+        if self.start_amount <= 0:
+            raise ValueError("Start Amount must be > 0.")
+        if not (0.01 <= self.profit_ratio <= 2.0):
+            # Why: unrealistic profit ratios cause math issues or absurd compounding.
+            raise ValueError("Profit Ratio must be between 0.01 and 2.0.")
+        if not self.asset.strip():
+            raise ValueError("Asset is required.")
+        if acct == "REAL" and not self.license_key.strip():
+            raise ValueError("License Key is required for REAL accounts.")
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "RavaConfig":
+        return RavaConfig(
+            username=d.get("username", "").strip(),
+            password=d.get("password", ""),
+            account_type=d.get("account_type", "PRACTICE").strip(),
+            start_amount=float(d.get("start_amount", 1.0)),
+            profit_ratio=float(d.get("profit_ratio", 0.8)),
+            asset=d.get("asset", "GBPUSD-OTC").strip(),
+            license_key=d.get("license_key", "").strip(),
+        )
+
+
+class ConfigManager:
+    """Single source of truth. GUI always saves here; bot uses in-memory object."""
+
+    @staticmethod
+    def load() -> Optional[RavaConfig]:
+        if not CONFIG_FILE.exists():
+            return None
+        with CONFIG_FILE.open("r", encoding="utf-8") as f:
+            d = json.load(f)
+        return RavaConfig.from_dict(d)
+
+    @staticmethod
+    def save(cfg: RavaConfig) -> None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with CONFIG_FILE.open("w", encoding="utf-8") as f:
+            json.dump(cfg.to_dict(), f, indent=4)
+
+
+# ========== Logging ==========
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s — %(levelname)s — %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE, encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+    logging.info("Logging initialized.")
+
+
+# ========== Single Instance Guard ==========
+
+class SingleInstance:
+    """Cross-platform single instance using lock file + pid check."""
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
         try:
-            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-            if payload.get("role") != "admin":
-                raise jwt.InvalidTokenError
-        except jwt.ExpiredSignatureError:
-            return jsonify({"status": "error", "message": "Token expired"}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"status": "error", "message": "Invalid token"}), 401
+            return psutil.pid_exists(pid)
+        except Exception:
+            # Fallback: try signal 0 (posix only)
+            try:
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                return False
 
-        return f(*args, **kwargs)
-    return wrapper
+    @classmethod
+    def acquire(cls) -> None:
+        if LOCK_FILE.exists():
+            try:
+                old_pid = int(LOCK_FILE.read_text().strip())
+            except Exception:
+                old_pid = -1
+            if cls._pid_alive(old_pid):
+                raise RuntimeError("Rava is already running.")
+            else:
+                try:
+                    LOCK_FILE.unlink()
+                except Exception:
+                    pass
+        LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+        logging.info("Lock acquired.")
 
-
-# --- ADMIN: LOGIN ---
-@app.route("/api/admin/login", methods=["POST"])
-def admin_login():
-    data = request.get_json(force=True)
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
-
-    if not email or not password:
-        return jsonify({"status": "error", "message": "Missing email or password"}), 400
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT password_hash FROM admin_users WHERE email=%s", (email,))
-            row = cur.fetchone()
-
-    if not row or not check_password_hash(row[0], password):
-        return jsonify({"status": "error", "message": "Invalid credentials"}), 401
-
-    # generate JWT
-    payload = {
-        "email": email,
-        "role": "admin",
-        "exp": int(time.time()) + JWT_EXPIRY
-    }
-    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-    return jsonify({"status": "success", "token": token})
+    @staticmethod
+    def release() -> None:
+        try:
+            if LOCK_FILE.exists():
+                LOCK_FILE.unlink()
+                logging.info("Lock released.")
+        except Exception:
+            pass
 
 
-# --- ADMIN: VERIFY TOKEN ---
-@app.route("/api/admin/verify", methods=["GET"])
-@require_admin
-def admin_verify():
-    """Verify that the current admin token is still valid"""
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.split(" ")[1]
-    payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    return jsonify({"status": "success", "email": payload["email"]})
+import certifi
+import requests
+
+API_BASE = "https://rava-license-server.onrender.com/api"
+
+def validate_license(email: str, license_key: str) -> Tuple[bool, str]:
+    """
+    Validate license against the backend API.
+    Returns (is_valid, status_message).
+    """
+    try:
+        url = f"{API_BASE}/check_license?email={email}&key={license_key}"
+        res = requests.get(url, timeout=8, verify=certifi.where())  # ✅ SSL fix here
+        data = res.json()
+
+        status = data.get("status")
+        if status == "valid":
+            return True, f"License valid until {data.get('expires_on', '?')}"
+        elif status == "expired":
+            return False, "License expired"
+        elif status == "pending":
+            return False, "License pending approval"
+        elif status == "rejected":
+            return False, "License rejected"
+        else:
+            return False, f"Invalid: {data.get('message', 'Unknown error')}"
+
+    except requests.exceptions.SSLError as e:
+        logging.error("SSL certificate verification failed: %s", e)
+        return False, "SSL certificate verification failed — please check your network or system time."
+    except ValueError:
+        logging.error("Invalid JSON from license server.")
+        return False, "Invalid response from license server."
+    except Exception as e:
+        logging.error("License check failed: %s", e)
+        return False, "License server error"
 
 
-# --- LICENSE CHECK (user side) ---
-@app.route("/api/check_license", methods=["GET"])
-def check_license():
-    email = request.args.get("email", "").strip().lower()
-    license_key = request.args.get("key", "").strip()
+# ========== Tray Icon Controller ==========
 
-    if not email:
-        return jsonify({"status": "error", "message": "Missing email"}), 400
+class TrayController:
+    """System tray with Quit; communicates via a shared shutdown event."""
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT license_key, expiry FROM licenses WHERE email = %s", (email,))
-            row = cur.fetchone()
+    def __init__(self, shutdown_event: threading.Event):
+        self._shutdown_event = shutdown_event
+        self._icon: Optional[pystray.Icon] = None
+        self._lock = threading.Lock()
+        self._status = "RAVA — idle"
+        self._color = (0, 200, 0)
+        self._thread: Optional[threading.Thread] = None
 
-            if row:
-                db_license, expiry = row
-                now = int(time.time())
+    @staticmethod
+    def _circle(color: Tuple[int, int, int]) -> Image.Image:
+        img = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
+        dc = ImageDraw.Draw(img)
+        dc.ellipse((8, 8, 56, 56), fill=color)
+        return img
 
-                # ✅ If a key was passed, validate it
-                if license_key:
-                    if not hmac.compare_digest(db_license, license_key):
-                        return jsonify({"status": "invalid", "message": "Invalid license key"}), 403
+    def _quit(self, *_):
+        # Why: quit from tray must stop bot & GUI cleanly.
+        self._shutdown_event.set()
+        if self._icon:
+            self._icon.stop()
 
-                # ✅ Expiry check
-                if now > expiry:
-                    return jsonify({
-                        "status": "expired",
-                        "expires_on": time.ctime(expiry)
-                    }), 403
+    def _run(self):
+        menu = pystray.Menu(pystray.MenuItem("Quit Rava", self._quit))
+        self._icon = pystray.Icon("RAVA", self._circle(self._color), self._status, menu)
+        self._icon.run()
 
-                remaining_days = int((expiry - now) / 86400)
-                return jsonify({
-                    "status": "valid",
-                    "email": email,
-                    "license_key": db_license,
-                    "expires_on": time.ctime(expiry),
-                    "days_remaining": remaining_days
-                })
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-            # No license? → check payments table
-            cur.execute("SELECT status FROM payments WHERE email=%s ORDER BY id DESC LIMIT 1", (email,))
-            pay = cur.fetchone()
-            if pay:
-                if pay[0] == "pending":
-                    return jsonify({"status": "pending"})
-                elif pay[0] == "rejected":
-                    return jsonify({"status": "rejected"})
-
-    return jsonify({"status": "inactive", "message": "No license or payment found"}), 404
+    def update(self, status: Optional[str] = None, color: Optional[Tuple[int, int, int]] = None):
+        with self._lock:
+            if status is not None:
+                self._status = status
+            if color is not None:
+                self._color = color
+            if self._icon:
+                self._icon.icon = self._circle(self._color)
+                self._icon.title = self._status
 
 
+# ========== Bot Runner (async) ==========
 
-# --- USER: MARK PAYMENT PENDING ---
-@app.route("/api/mark_payment_pending", methods=["POST"])
-def mark_payment_pending():
-    """Record a pending payment attempt"""
-    data = request.get_json(force=True)
-    email = data.get("email", "").strip().lower()
-    plan = data.get("plan", "").strip().lower()
+class RavaBot:
+    """Async trading bot using in-memory config and a shared shutdown event."""
 
-    if not email or not plan:
-        return jsonify({"status": "error", "message": "Missing email or plan"}), 400
+    def __init__(self, cfg: RavaConfig, shutdown_event: threading.Event, tray: TrayController):
+        self.cfg = cfg
+        self.shutdown_event = shutdown_event
+        self.tray = tray
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO payments (email, plan, status, created_at)
-                VALUES (%s, %s, 'pending', %s)
-            """, (email, plan, int(time.time())))
-        conn.commit()
+    def start(self):
+        """Launch bot in its own thread with its own event loop."""
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self._started.wait(timeout=5)
 
-    return jsonify({"status": "pending", "email": email, "plan": plan})
+    def _run_loop(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._started.set()
+        try:
+            self._loop.run_until_complete(self._main_async())
+        finally:
+            try:
+                SingleInstance.release()
+            finally:
+                if self._loop and self._loop.is_running():
+                    self._loop.stop()
+
+    async def _to_thread(self, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def _main_async(self):
+        logging.info("Bot starting...")
+        self.tray.update("RAVA — starting...", (255, 215, 0))
+
+        # License
+        if self.cfg.account_type.upper() == "REAL":
+            ok, msg = validate_license(self.cfg.username, self.cfg.license_key)
+            if not ok:
+                logging.error(msg)
+                self.tray.update(msg, (255, 0, 0))
+                return
+            else:
+                logging.info(msg)
+        else:
+            logging.info("PRACTICE account — license check skipped.")
+
+        # Brokers
+        if IQ_Option is None:
+            logging.error("iqoptionapi not available.")
+            return
+        if EJ_IQOption is None:
+            logging.error("ejtraderIQ not available.")
+            return
+
+        # Connect (in threads to avoid blocking)
+        iq = IQ_Option(self.cfg.username, self.cfg.password)
+        if not await self._to_thread(iq.connect):
+            logging.error("Failed to connect to IQ Option.")
+            return
+        if not iq.check_connect():
+            logging.error("IQ Option not connected.")
+            return
+        logging.info("Connected to IQ Option (data).")
+
+        # Switch balance type explicitly (PRACTICE/REAL)
+        try:
+            balance_type = self.cfg.account_type.upper()
+            if balance_type in {"PRACTICE", "REAL"}:
+                await self._to_thread(iq.change_balance, balance_type)
+                logging.info("Switched account type → %s", balance_type)
+            else:
+                logging.warning("Unknown account type: %s (defaulting to PRACTICE)", balance_type)
+                await self._to_thread(iq.change_balance, "PRACTICE")
+        except Exception as exc:
+            logging.error("Failed to switch account type: %s", exc)
+            return
+
+        try:
+            ej = EJ_IQOption(self.cfg.username, self.cfg.password, self.cfg.account_type)
+        except Exception as exc:
+            logging.error("EJTraderIQ connect error: %s", exc)
+            return
+        logging.info("Connected to EJTraderIQ (execution).")
+
+        # Precompute compound ladder
+        compounds = [round(self.cfg.start_amount, 2)]
+        for _ in range(4):
+            last = compounds[-1]
+            next_amt = round(last + round(last * self.cfg.profit_ratio, 2), 2)
+            compounds.append(next_amt)
+        logging.info("Compound levels: %s", compounds)
+
+        # Trade loop
+        self.tray.update(f"RAVA — trading {self.cfg.asset}", (0, 200, 0))
+        await self._trade_loop(iq, compounds)
+
+        logging.info("Bot exiting...")
+
+        # --- New helpers for precise timing & countdown ---
+    async def _sleep_until(self, target_ts: float) -> None:
+        """Sleep until UNIX timestamp `target_ts`, second-aligned to system clock.
+        Why: keeps countdown & scheduling tightly synced to the OS clock.
+        """
+        while not self.shutdown_event.is_set():
+            now = time.time()
+            remaining = target_ts - now
+            if remaining <= 0:
+                return
+            # Align to next whole second for top-notch accuracy
+            next_tick = math.floor(now) + 1
+            sleep_for = min(max(remaining, 0.0), max(next_tick - now, 0.0))
+            await asyncio.sleep(sleep_for if sleep_for > 0 else 0)
+
+    async def _countdown_worker(self, period: int = 300) -> None:
+        """Continuously log `Next trade cycle in Xs` every second, synced to system clock."""
+        try:
+            while not self.shutdown_event.is_set():
+                now = time.time()
+                next_mark = ((int(now) // period) + 1) * period
+                remaining = int(max(0, round(next_mark - now)))
+                logging.info("Next trade cycle in %ds", remaining)
+                # Sleep exactly to the next whole second boundary
+                next_sec = math.floor(now) + 1
+                await asyncio.sleep(max(0.0, next_sec - time.time()))
+        except asyncio.CancelledError:
+            return
+
+    # ========== Adjusted Trade Loop (with continuous countdown) ==========
+    async def _trade_loop(self, iq, compounds):
+        trade_active = False
+        compound_index = 0
+        in_recovery = False
+        compound_index_before_recovery = 0
+        recovery_amount = self.cfg.start_amount
+        asset = self.cfg.asset
+        pr = self.cfg.profit_ratio
+        period = 300  # 5m
+        settle_sec = 2  # small buffer after candle close
+
+        # Start continuous per-second countdown logger
+        countdown_task = asyncio.create_task(self._countdown_worker(period))
+
+        # Anchor to the NEXT 5-minute boundary
+        now = time.time()
+        cycle_epoch = ((int(now) // period) + 1) * period
+
+        try:
+            while not self.shutdown_event.is_set() and compound_index < len(compounds):
+                # Wait exactly until the cycle start (5-minute boundary)
+                await self._sleep_until(cycle_epoch)
+                if self.shutdown_event.is_set():
+                    break
+
+                # If a trade is somehow still active at boundary, skip this cycle to avoid overlap
+                if trade_active:
+                    logging.warning("Boundary @ %s reached but previous trade still active; skipping this cycle.",
+                                    datetime.fromtimestamp(cycle_epoch).strftime("%H:%M:%S"))
+                    cycle_epoch += period
+                    continue
+
+                # Balance
+                try:
+                    bal = iq.get_balance()
+                except Exception as exc:
+                    logging.warning("Balance read error: %s; retrying next cycle.", exc)
+                    cycle_epoch += period
+                    continue
+                logging.info("Balance: $%.2f", bal)
+
+                # Signal (based on the candle that just closed at cycle_epoch)
+                signal, prev = await self._to_thread(self._generate_signal, iq, asset)
+                if signal is None:
+                    logging.info("No signal at boundary %s; deferring to next cycle.",
+                                 datetime.fromtimestamp(cycle_epoch).strftime("%H:%M:%S"))
+                    cycle_epoch += period
+                    continue
+
+                trade_amt = recovery_amount if in_recovery else compounds[compound_index]
+                mode = "Recovery" if in_recovery else f"Compound {compound_index + 1}"
+                logging.info("Signal=%s | Amount=$%.2f | Mode=%s", signal, trade_amt, mode)
+
+                # STRICT EXPIRY: always next candle close. Use safety buffer check.
+                expiry_min = self.get_expiry_minutes(5, min_buffer_sec=10)
+                if expiry_min is None:
+                    logging.warning("Too close to candle close; skipping this cycle.")
+                    cycle_epoch += period
+                    continue
+
+                # Place trade ASAP after boundary
+                try:
+                    direction = "call" if signal == "CALL" else "put"
+                    ok, trade_id = iq.buy(trade_amt, asset, direction, expiry_min)
+                    placed_ts = time.time()
+                    placed_str = datetime.fromtimestamp(placed_ts).strftime("%H:%M:%S.%f")[:-3]
+                    if not ok:
+                        logging.warning("Trade placement failed at %s; deferring to next cycle.", placed_str)
+                        cycle_epoch += period
+                        continue
+
+                    next_close_ts = cycle_epoch + period
+                    expiry_time = datetime.fromtimestamp(next_close_ts).strftime("%H:%M:%S")
+                    remaining_seconds = int(max(0, round(next_close_ts - placed_ts)))
+
+                    logging.info(
+                        "Trade placed @ %s: %s $%.2f expiry @ %s (%ds left)",
+                        placed_str, signal, trade_amt, expiry_time, remaining_seconds
+                    )
+                    self.tray.update(f"{asset} {signal} ${trade_amt:.2f} [{mode}]", (0, 120, 255))
+                    trade_active = True
+                except Exception as exc:
+                    logging.error("Trade error: %s", exc)
+                    cycle_epoch += period
+                    continue
+
+                # Wait precisely until expiry (next boundary) + small settlement buffer
+                await self._sleep_until(next_close_ts + settle_sec)
+                if self.shutdown_event.is_set():
+                    break
+
+                # Fetch result
+                try:
+                    new_bal = iq.get_balance()
+                except Exception as exc:
+                    logging.warning("Balance read error after expiry: %s", exc)
+                    new_bal = bal  # fall back; treated as no change
+
+                payout = new_bal - bal
+                real_win = payout > 0
+                real_loss = payout < 0
+                logical_win = (signal == "CALL" and prev["close"] > prev["open"]) or \
+                              (signal == "PUT" and prev["close"] < prev["open"]) 
+
+                if real_win:
+                    logging.info("[WIN] +$%.2f", payout)
+                    self.tray.update(f"WIN +${payout:.2f}", (0, 200, 0))
+                    if in_recovery:
+                        in_recovery = False
+                        compound_index = compound_index_before_recovery + 1
+                    else:
+                        compound_index += 1
+                elif real_loss:
+                    logging.info("[LOSS] -$%.2f", -payout)
+                    self.tray.update(f"LOSS -${-payout:.2f}", (255, 0, 0))
+                    if not in_recovery:
+                        compound_index_before_recovery = compound_index
+                    in_recovery = True
+                    recovery_amount = round((trade_amt + (trade_amt * pr)) / max(pr, 1e-6), 2)
+                else:
+                    logging.info("[NO CHANGE]")
+
+                if logical_win and real_loss:
+                    logging.warning("[MISMATCH] Logical win but real loss (slippage?)")
+
+                trade_active = False
+                # Advance to next cycle boundary
+                cycle_epoch += period
+
+            logging.info("Trade loop done.")
+            self.tray.update("RAVA — stopped", (120, 120, 120))
+        finally:
+            # Stop countdown task
+            if countdown_task and not countdown_task.done():
+                countdown_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await countdown_task
 
 
-# --- ADMIN: GET PENDING PAYMENTS ---
-@app.route("/api/pending_payments", methods=["GET"])
-@require_admin
-def pending_payments():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, email, plan, status, created_at FROM payments WHERE status='pending'")
-            rows = cur.fetchall()
 
-    payments = [
-        {"id": r[0], "email": r[1], "plan": r[2], "status": r[3], "created_at": r[4]}
-        for r in rows
-    ]
-    return jsonify({"status": "success", "payments": payments})
+    @staticmethod
+    def _generate_signal(iq, asset):
+        tf = 300
+        now = int(time.time())
+        prev_candle_time = now - (now % tf) - tf
+        candles = iq.get_candles(asset, tf, 3, prev_candle_time)
+        if not candles:
+            return None, None
+        prev = candles[-1]
+        if prev["close"] > prev["open"]:
+            return "CALL", prev
+        if prev["close"] < prev["open"]:
+            return "PUT", prev
+        return None, prev
 
+    @staticmethod
+    def get_expiry_minutes(interval_minutes: int, min_buffer_sec: int = 10) -> Optional[int]:
+        """
+        Always expire exactly at the *next* candle close for the given interval.
+        Uses CEIL to prevent accidental 4-minute expiries.
+        If we are too close to the boundary (within min_buffer_sec), skip this cycle.
+        """
+        now = time.time()
+        period = interval_minutes * 60
+        next_candle = ((int(now) // period) + 1) * period
+        remaining_seconds = next_candle - now
 
-# --- ADMIN: APPROVE PAYMENT & ISSUE LICENSE ---
-@app.route("/api/approve_payment", methods=["POST"])
-@require_admin
-def approve_payment():
-    """Admin approves a payment and issues a license"""
-    data = request.get_json(force=True)
-    email = data.get("email", "").strip().lower()
-    plan = data.get("plan", "").strip().lower()
-    days = int(data.get("days", 30))
+        if remaining_seconds < min_buffer_sec:
+            return None  # too close; try next cycle
 
-    if not email or not plan:
-        return jsonify({"status": "error", "message": "Missing email or plan"}), 400
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            # update payment
-            cur.execute("""
-                UPDATE payments
-                SET status='approved'
-                WHERE email=%s AND plan=%s AND status='pending'
-                RETURNING id
-            """, (email, plan))
-            payment_row = cur.fetchone()
-
-            if not payment_row:
-                return jsonify({"status": "error", "message": "No pending payment found"}), 404
-
-            # issue license
-            expiry = int(time.time()) + days * 86400
-            license_key = generate_license(email)
-
-            cur.execute("""
-                INSERT INTO licenses (email, license_key, expiry)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (email) DO UPDATE
-                SET license_key = EXCLUDED.license_key,
-                    expiry = EXCLUDED.expiry
-            """, (email, license_key, expiry))
-
-        conn.commit()
-
-    remaining_days = int((expiry - int(time.time())) / 86400)
-
-    return jsonify({
-        "status": "approved",
-        "email": email,
-        "plan": plan,
-        "license_key": license_key,
-        "expires_on": time.ctime(expiry),
-        "expiry_timestamp": expiry,
-        "days_remaining": remaining_days
-    })
+        # CEIL ensures e.g. 4m20s left → 5 minutes expiry, not 4
+        expiry_minutes = int(math.ceil(remaining_seconds / 60.0))
+        return expiry_minutes
 
 
-# --- ADMIN: REJECT PAYMENT ---
-@app.route("/api/reject_payment", methods=["POST"])
-@require_admin
-def reject_payment():
-    """Admin rejects a pending payment"""
-    data = request.get_json(force=True)
-    payment_id = data.get("id")
 
-    if not payment_id:
-        return jsonify({"status": "error", "message": "Missing payment ID"}), 400
+# ========== GUI (PyQt5) ==========
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE payments
-                SET status='rejected'
-                WHERE id=%s AND status='pending'
-                RETURNING id
-            """, (payment_id,))
-            row = cur.fetchone()
+class RavaGUI(QWidget):
+    """Single GUI that edits config, runs/stops bot, and keeps everything in sync."""
 
-            if not row:
-                return jsonify({"status": "error", "message": "No pending payment found"}), 404
+    bot_started = pyqtSignal()
+    bot_stopped = pyqtSignal()
 
-        conn.commit()
+    def __init__(self, shutdown_event: threading.Event, tray: TrayController):
+        super().__init__()
+        self.shutdown_event = shutdown_event
+        self.tray = tray
+        self.bot: Optional[RavaBot] = None
 
-    return jsonify({
-        "status": "success",
-        "message": f"Payment {payment_id} rejected"
-    })
+        self.setWindowTitle("RAVA™ — Elite Trader")
+        self.setGeometry(500, 200, 420, 520)
+
+        layout = QVBoxLayout()
+
+        # Username
+        layout.addWidget(QLabel("Username (email):"))
+        self.username = QLineEdit()
+        layout.addWidget(self.username)
+
+        # Password
+        layout.addWidget(QLabel("Password:"))
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.password)
+
+        # Account type
+        layout.addWidget(QLabel("Account Type:"))
+        self.account_type = QComboBox()
+        self.account_type.addItems(["PRACTICE", "REAL"])
+        layout.addWidget(self.account_type)
+
+        # License
+        layout.addWidget(QLabel("License Key (REAL only):"))
+        self.license_key = QLineEdit()
+        self.license_key.setPlaceholderText("Required for REAL; ignored for PRACTICE")
+        layout.addWidget(self.license_key)
+
+        # Start amount
+        layout.addWidget(QLabel("Start Amount ($):"))
+        self.start_amount = QLineEdit()
+        self.start_amount.setPlaceholderText("e.g. 5")
+        layout.addWidget(self.start_amount)
+
+        # Profit ratio
+        layout.addWidget(QLabel("Profit Ratio (e.g., 0.85):"))
+        self.profit_ratio = QLineEdit()
+        self.profit_ratio.setPlaceholderText("0.85")
+        layout.addWidget(self.profit_ratio)
+
+        # Asset
+        layout.addWidget(QLabel("Asset:"))
+        self.asset = QLineEdit()
+        self.asset.setPlaceholderText("e.g., GBPUSD-OTC")
+        layout.addWidget(self.asset)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self.start_btn = QPushButton("🚀 Start")
+        self.stop_btn = QPushButton("🛑 Stop")
+        self.stop_btn.setEnabled(False)
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.stop_btn)
+        layout.addLayout(btn_row)
+
+        self.setLayout(layout)
+
+        # Events
+        self.start_btn.clicked.connect(self.on_start)
+        self.stop_btn.clicked.connect(self.on_stop)
+        self.account_type.currentIndexChanged.connect(self._toggle_license)
+        self.bot_started.connect(self._on_bot_started)
+        self.bot_stopped.connect(self._on_bot_stopped)
+
+        # Prefill from existing config if present
+        self._load_existing()
+        self._toggle_license()
+
+    def _load_existing(self):
+        cfg = ConfigManager.load()
+        if not cfg:
+            return
+        self.username.setText(cfg.username)
+        self.password.setText(cfg.password)
+        self.account_type.setCurrentText(cfg.account_type.upper())
+        self.license_key.setText(cfg.license_key)
+        self.start_amount.setText(str(cfg.start_amount))
+        self.profit_ratio.setText(str(cfg.profit_ratio))
+        self.asset.setText(cfg.asset)
+
+    def _toggle_license(self):
+        is_PRACTICE = self.account_type.currentText().upper() == "PRACTICE"
+        self.license_key.setDisabled(is_PRACTICE)
+        if is_PRACTICE:
+            self.license_key.setPlaceholderText("Ignored in PRACTICE")
+        else:
+            self.license_key.setPlaceholderText("Required for REAL")
+
+    def _read_config_from_ui(self) -> RavaConfig:
+        cfg = RavaConfig(
+            username=self.username.text().strip(),
+            password=self.password.text(),
+            account_type=self.account_type.currentText().strip(),
+            start_amount=float(self.start_amount.text().strip()),
+            profit_ratio=float(self.profit_ratio.text().strip()),
+            asset=self.asset.text().strip(),
+            license_key=self.license_key.text().strip(),
+        )
+        cfg.validate()
+        return cfg
+
+    def on_start(self):
+        try:
+            cfg = self._read_config_from_ui()
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", str(e))
+            return
+        except Exception:
+            QMessageBox.warning(self, "Invalid Input", "Please fill all fields correctly.")
+            return
+
+        # Persist immediately (always rewritable)
+        ConfigManager.save(cfg)
+
+        # Enforce single instance
+        try:
+            SingleInstance.acquire()
+        except RuntimeError as e:
+            QMessageBox.warning(self, "Already Running", str(e))
+            return
+
+        # Start tray (idempotent)
+        self.tray.update("RAVA — starting...", (255, 215, 0))
+
+        # Start bot
+        self.bot = RavaBot(cfg, self.shutdown_event, self.tray)
+        self.bot.start()
+        self.bot_started.emit()
+
+    def on_stop(self):
+        self.shutdown_event.set()
+        self.tray.update("RAVA — stopping...", (255, 120, 0))
+        self.bot_stopped.emit()
+
+    def _on_bot_started(self):
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+    def _on_bot_stopped(self):
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
 
 
-# --- ADMIN: MANUAL LICENSE RENEW ---
-@app.route("/api/renew_license", methods=["POST"])
-@require_admin
-def renew_license():
-    data = request.get_json(force=True)
-    email = data.get("email", "").strip().lower()
-    days = int(data.get("days", 30))
+# ========== Entrypoint ==========
 
-    if not email:
-        return jsonify({"status": "error", "message": "Missing email"}), 400
+def main():
+    # Logging first
+    setup_logging()
 
-    expiry = int(time.time()) + days * 86400
-    license_key = generate_license(email)
+    # Global shutdown event (tray + GUI + bot share it)
+    shutdown_event = threading.Event()
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO licenses (email, license_key, expiry)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (email) DO UPDATE
-                SET license_key = EXCLUDED.license_key,
-                    expiry = EXCLUDED.expiry
-            """, (email, license_key, expiry))
-        conn.commit()
+    # Trap Ctrl+C and OS signals
+    def _sig_handler(signum, _):
+        logging.info("Signal %s received; shutting down...", signum)
+        shutdown_event.set()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _sig_handler)
+        except Exception:
+            pass
 
-    remaining_days = int((expiry - int(time.time())) / 86400)
+    # Tray
+    tray = TrayController(shutdown_event)
+    tray.start()
 
-    return jsonify({
-        "status": "renewed",
-        "email": email,
-        "license_key": license_key,
-        "expires_on": time.ctime(expiry),
-        "expiry_timestamp": expiry,
-        "days_remaining": remaining_days
-    })
+    # GUI
+    app = QApplication(sys.argv)
+    gui = RavaGUI(shutdown_event, tray)
+    gui.show()
 
-# --- ADMIN: VIEW ALL ACTIVE USERS ---
-@app.route("/api/all_users", methods=["GET"])
-@require_admin
-def all_users():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT email, license_key, expiry
-                FROM licenses
-                ORDER BY expiry DESC
-            """)
-            rows = cur.fetchall()
+    # When shutdown_event is set (e.g., tray quit), close GUI too.
+    def _watch_shutdown():
+        shutdown_event.wait()
+        gui.close()
+    threading.Thread(target=_watch_shutdown, daemon=True).start()
 
-    users = [
-        {
-            "email": r[0],
-            "license_key": r[1],
-            "expiry_timestamp": r[2],
-            "expires_on": time.ctime(r[2]),
-            "days_remaining": int((r[2] - int(time.time())) / 86400)
-        }
-        for r in rows
-    ]
-
-    return jsonify({"status": "success", "users": users})
-
-# --- ADMIN DASHBOARD STATIC PAGE ---
-@app.route("/admin")
-def admin_page():
-    return send_from_directory("static", "admin.html")
+    code = app.exec_()
+    # Ensure lock released if GUI-initiated stop
+    SingleInstance.release()
+    sys.exit(code)
 
 
-# --- MAIN ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
-
-
-
-
-
-
-
-
+    main()
