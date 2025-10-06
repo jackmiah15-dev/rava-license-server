@@ -189,9 +189,10 @@ class SingleInstance:
             pass
 
 
+import certifi
 import requests
 
-API_BASE = "https://your-backend.onrender.com/api"
+API_BASE = "https://rava-license-server.onrender.com/api"
 
 def validate_license(email: str, license_key: str) -> Tuple[bool, str]:
     """
@@ -200,7 +201,7 @@ def validate_license(email: str, license_key: str) -> Tuple[bool, str]:
     """
     try:
         url = f"{API_BASE}/check_license?email={email}&key={license_key}"
-        res = requests.get(url, timeout=8)
+        res = requests.get(url, timeout=8, verify=certifi.where())  # ✅ SSL fix here
         data = res.json()
 
         status = data.get("status")
@@ -214,9 +215,17 @@ def validate_license(email: str, license_key: str) -> Tuple[bool, str]:
             return False, "License rejected"
         else:
             return False, f"Invalid: {data.get('message', 'Unknown error')}"
+
+    except requests.exceptions.SSLError as e:
+        logging.error("SSL certificate verification failed: %s", e)
+        return False, "SSL certificate verification failed — please check your network or system time."
+    except ValueError:
+        logging.error("Invalid JSON from license server.")
+        return False, "Invalid response from license server."
     except Exception as e:
         logging.error("License check failed: %s", e)
         return False, "License server error"
+
 
 # ========== Tray Icon Controller ==========
 
