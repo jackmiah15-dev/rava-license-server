@@ -203,6 +203,16 @@ def debug_db():
         print("❌ Database debug failed:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+@app.route("/api/debug/licenses")
+def debug_licenses():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM licenses;")
+                rows = cur.fetchall()
+                return jsonify({"count": len(rows), "licenses": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 # --- Home Route ---
 @app.route("/")
@@ -222,3 +232,4 @@ def home():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
