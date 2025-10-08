@@ -23,19 +23,19 @@ def get_db():
     return psycopg.connect(DATABASE_URL, autocommit=True)
 
 def init_db():
-    """Ensure the licenses table exists and has all required columns."""
+    """Ensure the licenses table exists and all required columns are present."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                # Create table if not exists
+                # Create minimal table if not exists
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS licenses (
-                        id SERIAL PRIMARY KEY,
                         email TEXT NOT NULL,
                         license_key TEXT NOT NULL
                     );
                 """)
-                # Add columns if missing
+                # Add missing columns
+                cur.execute("""ALTER TABLE licenses ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY;""")
                 cur.execute("""ALTER TABLE licenses ADD COLUMN IF NOT EXISTS expiry_timestamp BIGINT DEFAULT 0;""")
                 cur.execute("""ALTER TABLE licenses ADD COLUMN IF NOT EXISTS days_remaining INT DEFAULT 0;""")
         print("✅ Database schema verified and fixed if needed.")
@@ -88,15 +88,24 @@ def all_users():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     try:
-        init_db()  # ensure schema is correct
+        init_db()  # ensure table + columns exist
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Check if id column exists
                 cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'licenses';
+                """)
+                cols = [r[0] for r in cur.fetchall()]
+                order_clause = "ORDER BY id DESC" if "id" in cols else ""
+
+                cur.execute(f"""
                     SELECT email, license_key, expiry_timestamp, days_remaining
                     FROM licenses
-                    ORDER BY id DESC;
+                    {order_clause};
                 """)
                 rows = cur.fetchall()
+
                 users = [
                     {
                         "email": r[0],
@@ -105,6 +114,7 @@ def all_users():
                         "days_remaining": r[3]
                     } for r in rows
                 ]
+
         return jsonify({"status": "success", "users": users})
     except Exception as e:
         print("❌ Error loading users:", e)
@@ -224,4 +234,5 @@ def home():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
 
