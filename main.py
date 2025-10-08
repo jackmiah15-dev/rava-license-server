@@ -23,27 +23,26 @@ def get_db():
     return psycopg.connect(DATABASE_URL, autocommit=True)
 
 def init_db():
-    """Ensure the licenses table exists and schema is up to date."""
+    """Ensure the licenses table exists and has all required columns."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                # create table if not exists
+                # Create table if not exists
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS licenses (
                         id SERIAL PRIMARY KEY,
                         email TEXT NOT NULL,
-                        license_key TEXT NOT NULL,
-                        expiry_timestamp BIGINT NOT NULL
+                        license_key TEXT NOT NULL
                     );
                 """)
-                # add column if missing
-                cur.execute("""
-                    ALTER TABLE licenses ADD COLUMN IF NOT EXISTS days_remaining INT DEFAULT 0;
-                """)
-        print("✅ Database initialized and schema verified.")
+                # Add columns if missing
+                cur.execute("""ALTER TABLE licenses ADD COLUMN IF NOT EXISTS expiry_timestamp BIGINT DEFAULT 0;""")
+                cur.execute("""ALTER TABLE licenses ADD COLUMN IF NOT EXISTS days_remaining INT DEFAULT 0;""")
+        print("✅ Database schema verified and fixed if needed.")
     except Exception as e:
         print("❌ Database initialization failed:", e)
         traceback.print_exc()
+
 
 # --- Admin authentication ---
 @app.route("/api/admin/login", methods=["POST"])
@@ -89,10 +88,14 @@ def all_users():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     try:
-        init_db()
+        init_db()  # ensure schema is correct
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT email, license_key, expiry_timestamp, days_remaining FROM licenses;")
+                cur.execute("""
+                    SELECT email, license_key, expiry_timestamp, days_remaining
+                    FROM licenses
+                    ORDER BY id DESC;
+                """)
                 rows = cur.fetchall()
                 users = [
                     {
@@ -107,6 +110,7 @@ def all_users():
         print("❌ Error loading users:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 # --- Pending payments (now empty, for future use) ---
 @app.route("/api/pending_payments")
@@ -220,3 +224,4 @@ def home():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
