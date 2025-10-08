@@ -229,10 +229,26 @@ def home():
             "/api/check_license"
         ]
     })
+# --- Temporary fix route to update days_remaining ---
+@app.route("/api/fix_days", methods=["POST"])
+def fix_days():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE licenses
+                    SET days_remaining = GREATEST(0, FLOOR((expiry_timestamp - EXTRACT(EPOCH FROM NOW())) / 86400))
+                    WHERE expiry_timestamp IS NOT NULL;
+                """)
+        return jsonify({"status": "success", "message": "days_remaining updated successfully"})
+    except Exception as e:
+        print("❌ Error updating days_remaining:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Start app ---
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
 
 
