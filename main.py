@@ -229,7 +229,7 @@ def home():
             "/api/check_license"
         ]
     })
-@app.route("/api/reset_expiry", methods=["POST"])
+@app.route("/api/reset_expiry", methods=["GET", "POST"])
 def reset_expiry():
     """Give all licenses a fresh 30-day expiry."""
     try:
@@ -292,6 +292,7 @@ def fix_days():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
