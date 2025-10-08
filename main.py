@@ -4,7 +4,6 @@ import jwt
 import time
 import os
 import psycopg
-import json
 import traceback
 
 # --- Environment Setup ---
@@ -24,20 +23,24 @@ def get_db():
     return psycopg.connect(DATABASE_URL, autocommit=True)
 
 def init_db():
-    """Create the licenses table if it doesn't exist."""
+    """Ensure the licenses table exists and schema is up to date."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                # create table if not exists
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS licenses (
                         id SERIAL PRIMARY KEY,
                         email TEXT NOT NULL,
                         license_key TEXT NOT NULL,
-                        expiry_timestamp BIGINT NOT NULL,
-                        days_remaining INT NOT NULL
+                        expiry_timestamp BIGINT NOT NULL
                     );
                 """)
-        print("✅ Database initialized successfully.")
+                # add column if missing
+                cur.execute("""
+                    ALTER TABLE licenses ADD COLUMN IF NOT EXISTS days_remaining INT DEFAULT 0;
+                """)
+        print("✅ Database initialized and schema verified.")
     except Exception as e:
         print("❌ Database initialization failed:", e)
         traceback.print_exc()
@@ -51,7 +54,7 @@ def admin_login():
 
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         token = jwt.encode(
-            {"admin": True, "exp": time.time() + 86400},  # 1 day
+            {"admin": True, "exp": time.time() + 86400},  # valid 1 day
             SECRET_KEY,
             algorithm="HS256"
         )
@@ -79,14 +82,14 @@ def admin_verify():
         return jsonify({"status": "error", "message": "Invalid or expired token"}), 401
     return jsonify({"status": "success"})
 
-# --- User list ---
+# --- All users ---
 @app.route("/api/all_users")
 def all_users():
     if not require_admin(request):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     try:
-        init_db()  # make sure table exists
+        init_db()
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT email, license_key, expiry_timestamp, days_remaining FROM licenses;")
@@ -105,17 +108,13 @@ def all_users():
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- Pending payments (demo data) ---
+# --- Pending payments (now empty, for future use) ---
 @app.route("/api/pending_payments")
 def pending_payments():
     if not require_admin(request):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
-    pending = [
-        {"id": 1, "email": "user1@example.com", "plan": "Pro", "created_at": int(time.time()) - 3600, "txid": "ABC123"},
-        {"id": 2, "email": "user2@example.com", "plan": "Standard", "created_at": int(time.time()) - 7200, "txid": "XYZ789"},
-    ]
-    return jsonify({"status": "success", "payments": pending})
+    # return empty list instead of demo data
+    return jsonify({"status": "success", "payments": []})
 
 # --- Approve payment ---
 @app.route("/api/approve_payment", methods=["POST"])
@@ -125,7 +124,6 @@ def approve_payment():
 
     data = request.json or {}
     email = data.get("email")
-    plan = data.get("plan")
     days = int(data.get("days", 30))
 
     if not email:
@@ -203,16 +201,6 @@ def debug_db():
         print("❌ Database debug failed:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-@app.route("/api/debug/licenses")
-def debug_licenses():
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM licenses;")
-                rows = cur.fetchall()
-                return jsonify({"count": len(rows), "licenses": rows})
-    except Exception as e:
-        return jsonify({"error": str(e)})
 
 # --- Home Route ---
 @app.route("/")
@@ -232,4 +220,3 @@ def home():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
-
