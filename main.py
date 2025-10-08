@@ -172,30 +172,48 @@ def reject_payment():
 # --- Check license ---
 @app.route("/api/check_license")
 def check_license():
+    """Simplified license check: only requires email"""
     email = request.args.get("email")
-    key = request.args.get("key")
+
+    if not email:
+        return jsonify({"status": "error", "message": "Missing email"}), 400
 
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT expiry_timestamp FROM licenses WHERE email = %s AND license_key = %s;",
-                    (email, key)
-                )
+                cur.execute("""
+                    SELECT license_key, expiry_timestamp, days_remaining
+                    FROM licenses
+                    WHERE email = %s;
+                """, (email,))
                 row = cur.fetchone()
+
                 if not row:
                     return jsonify({"status": "invalid"})
-                expiry = row[0]
+
+                license_key, expiry, days_remaining = row
+
+                # Expired license
                 if time.time() > expiry:
-                    return jsonify({"status": "expired"})
+                    return jsonify({
+                        "status": "expired",
+                        "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry))
+                    })
+
+                # Valid license
                 return jsonify({
                     "status": "valid",
-                    "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry))
+                    "email": email,
+                    "license_key": license_key,
+                    "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry)),
+                    "days_remaining": days_remaining
                 })
+
     except Exception as e:
         print("❌ License check failed:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 # --- Serve Admin Dashboard ---
 @app.route("/admin")
@@ -292,6 +310,7 @@ def fix_days():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
