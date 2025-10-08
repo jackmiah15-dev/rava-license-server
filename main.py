@@ -229,6 +229,24 @@ def home():
             "/api/check_license"
         ]
     })
+@app.route("/api/reset_expiry", methods=["POST"])
+def reset_expiry():
+    """Give all licenses a fresh 30-day expiry."""
+    try:
+        now = int(time.time())
+        new_expiry = now + 30 * 86400  # 30 days from now
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE licenses
+                    SET expiry_timestamp = %s,
+                        days_remaining = 30;
+                """, (new_expiry,))
+        return jsonify({"status": "success", "message": "All licenses reset to 30 days"})
+    except Exception as e:
+        print("❌ Error resetting expiry:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 # --- Debug and Maintenance Routes ---
 
 @app.route("/api/debug/licenses")
@@ -274,6 +292,7 @@ def fix_days():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
