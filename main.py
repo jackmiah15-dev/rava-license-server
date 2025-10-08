@@ -155,9 +155,15 @@ def home():
         ]
     })
 
+from flask import send_from_directory
+
+@app.route('/admin')
+def serve_admin():
+    return send_from_directory('static', 'admin.html')
 
 # --- Entry point ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
