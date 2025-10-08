@@ -142,7 +142,21 @@ def check_license():
                 "expires_on": time.strftime("%Y-%m-%d", time.localtime(user["expiry_timestamp"]))
             })
     return jsonify({"status": "invalid"})
+    @app.route('/')
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "✅ RAVA License API is running",
+        "endpoints": [
+            "/api/admin/login",
+            "/api/all_users",
+            "/api/pending_payments",
+            "/api/check_license"
+        ]
+    })
+
 
 # --- Entry point ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
