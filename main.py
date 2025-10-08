@@ -5,6 +5,7 @@ import time
 import os
 import psycopg
 import json
+import traceback
 
 # --- Environment Setup ---
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@rava.com")
@@ -24,17 +25,22 @@ def get_db():
 
 def init_db():
     """Create the licenses table if it doesn't exist."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS licenses (
-                    id SERIAL PRIMARY KEY,
-                    email TEXT NOT NULL,
-                    license_key TEXT NOT NULL,
-                    expiry_timestamp BIGINT NOT NULL,
-                    days_remaining INT NOT NULL
-                );
-            """)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS licenses (
+                        id SERIAL PRIMARY KEY,
+                        email TEXT NOT NULL,
+                        license_key TEXT NOT NULL,
+                        expiry_timestamp BIGINT NOT NULL,
+                        days_remaining INT NOT NULL
+                    );
+                """)
+        print("✅ Database initialized successfully.")
+    except Exception as e:
+        print("❌ Database initialization failed:", e)
+        traceback.print_exc()
 
 # --- Admin authentication ---
 @app.route("/api/admin/login", methods=["POST"])
@@ -79,19 +85,25 @@ def all_users():
     if not require_admin(request):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT email, license_key, expiry_timestamp, days_remaining FROM licenses;")
-            rows = cur.fetchall()
-            users = [
-                {
-                    "email": r[0],
-                    "license_key": r[1],
-                    "expiry_timestamp": r[2],
-                    "days_remaining": r[3]
-                } for r in rows
-            ]
-    return jsonify({"status": "success", "users": users})
+    try:
+        init_db()  # make sure table exists
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT email, license_key, expiry_timestamp, days_remaining FROM licenses;")
+                rows = cur.fetchall()
+                users = [
+                    {
+                        "email": r[0],
+                        "license_key": r[1],
+                        "expiry_timestamp": r[2],
+                        "days_remaining": r[3]
+                    } for r in rows
+                ]
+        return jsonify({"status": "success", "users": users})
+    except Exception as e:
+        print("❌ Error loading users:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Pending payments (demo data) ---
 @app.route("/api/pending_payments")
@@ -119,17 +131,21 @@ def approve_payment():
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
 
-    expiry_timestamp = int(time.time()) + days * 86400
-    license_key = f"LIC-{int(time.time())}-{email[:3].upper()}"
+    try:
+        expiry_timestamp = int(time.time()) + days * 86400
+        license_key = f"LIC-{int(time.time())}-{email[:3].upper()}"
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO licenses (email, license_key, expiry_timestamp, days_remaining) VALUES (%s, %s, %s, %s)",
-                (email, license_key, expiry_timestamp, days)
-            )
-
-    return jsonify({"status": "approved", "message": f"License approved for {days} days"})
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO licenses (email, license_key, expiry_timestamp, days_remaining)
+                    VALUES (%s, %s, %s, %s)
+                """, (email, license_key, expiry_timestamp, days))
+        return jsonify({"status": "approved", "message": f"License approved for {days} days"})
+    except Exception as e:
+        print("❌ Error approving payment:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Reject payment ---
 @app.route("/api/reject_payment", methods=["POST"])
@@ -147,27 +163,46 @@ def check_license():
     email = request.args.get("email")
     key = request.args.get("key")
 
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT expiry_timestamp FROM licenses WHERE email = %s AND license_key = %s;",
-                (email, key)
-            )
-            row = cur.fetchone()
-            if not row:
-                return jsonify({"status": "invalid"})
-            expiry = row[0]
-            if time.time() > expiry:
-                return jsonify({"status": "expired"})
-            return jsonify({
-                "status": "valid",
-                "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry))
-            })
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT expiry_timestamp FROM licenses WHERE email = %s AND license_key = %s;",
+                    (email, key)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"status": "invalid"})
+                expiry = row[0]
+                if time.time() > expiry:
+                    return jsonify({"status": "expired"})
+                return jsonify({
+                    "status": "valid",
+                    "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry))
+                })
+    except Exception as e:
+        print("❌ License check failed:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Serve Admin Dashboard ---
 @app.route("/admin")
 def serve_admin():
     return send_from_directory("static", "admin.html")
+
+# --- Debug DB connection ---
+@app.route("/api/debug/db")
+def debug_db():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT NOW();")
+                ts = cur.fetchone()[0]
+        return jsonify({"status": "ok", "db_time": ts.isoformat()})
+    except Exception as e:
+        print("❌ Database debug failed:", e)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Home Route ---
 @app.route("/")
