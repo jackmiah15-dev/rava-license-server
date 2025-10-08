@@ -229,9 +229,33 @@ def home():
             "/api/check_license"
         ]
     })
-# --- Temporary fix route to update days_remaining ---
+# --- Debug and Maintenance Routes ---
+
+@app.route("/api/debug/licenses")
+def debug_licenses():
+    """View all current licenses and their remaining days"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT email, license_key, expiry_timestamp, 
+                           FLOOR((expiry_timestamp - EXTRACT(EPOCH FROM NOW())) / 86400) AS days_remaining
+                    FROM licenses
+                    ORDER BY email;
+                """)
+                rows = cur.fetchall()
+                return jsonify({
+                    "count": len(rows),
+                    "licenses": rows
+                })
+    except Exception as e:
+        print("❌ Error fetching licenses:", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/fix_days", methods=["POST"])
 def fix_days():
+    """Update the days_remaining values in the licenses table"""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -245,10 +269,13 @@ def fix_days():
         print("❌ Error updating days_remaining:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 # --- Start app ---
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
+
+
 
 
 
