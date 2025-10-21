@@ -187,9 +187,9 @@ def approve_payment():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     data = request.json or {}
+    pid = data.get("id")  # payment ID from pending_payments
     email = data.get("email")
     days = int(data.get("days", 30))
-    pid = data.get("id")
 
     if not email:
         return jsonify({"status": "error", "message": "Missing email"}), 400
@@ -200,36 +200,45 @@ def approve_payment():
 
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Create the new license
                 cur.execute("""
                     INSERT INTO licenses (email, license_key, expiry_timestamp, days_remaining)
                     VALUES (%s, %s, %s, %s)
                 """, (email, license_key, expiry_timestamp, days))
+
+                # Remove the approved payment from pending_payments
                 if pid:
-                    cur.execute("DELETE FROM pending_payments WHERE id = %s;", (pid,))
-        return jsonify({"status": "approved", "message": f"License approved for {days} days"})
+                    cur.execute("DELETE FROM pending_payments WHERE id = %s", (pid,))
+
+        return jsonify({
+            "status": "approved",
+            "message": f"License approved for {days} days and payment cleared."
+        })
     except Exception as e:
         print("❌ Error approving payment:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-
 # --- ✅ Reject payment ---
 @app.route("/api/reject_payment", methods=["POST"])
 def reject_payment():
     if not require_admin(request):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
     data = request.json or {}
     pid = data.get("id")
+
+    if not pid:
+        return jsonify({"status": "error", "message": "Missing payment ID"}), 400
+
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM pending_payments WHERE id = %s;", (pid,))
-        print(f"❌ Rejected payment ID {pid}")
-        return jsonify({"status": "success", "message": f"Payment {pid} rejected"})
+                cur.execute("DELETE FROM pending_payments WHERE id = %s", (pid,))
+        return jsonify({"status": "success", "message": f"Payment {pid} rejected and removed."})
     except Exception as e:
         print("❌ Error rejecting payment:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
-
 # --- Check license ---
 @app.route("/api/check_license")
 def check_license():
@@ -369,4 +378,5 @@ else:
         init_db()
     except Exception as e:
         print("⚠️ DB init skipped on import:", e)
+
 
