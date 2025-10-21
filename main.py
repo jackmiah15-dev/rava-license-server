@@ -14,7 +14,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Flask setup ---
 app = Flask(__name__)
-CORS(app)
+
+# ✅ Allow requests from your Netlify frontend + local dev
+CORS(app, origins=[
+    "https://rava-ai-trader.netlify.app",
+    "http://localhost:3000"
+], supports_credentials=True)
 
 # --- Database helper ---
 def get_db():
@@ -42,7 +47,6 @@ def init_db():
     except Exception as e:
         print("❌ Database initialization failed:", e)
         traceback.print_exc()
-
 
 # --- Admin authentication ---
 @app.route("/api/admin/login", methods=["POST"])
@@ -88,10 +92,9 @@ def all_users():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     try:
-        init_db()  # ensure table + columns exist
+        init_db()
         with get_db() as conn:
             with conn.cursor() as cur:
-                # Check if id column exists
                 cur.execute("""
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'licenses';
@@ -114,20 +117,17 @@ def all_users():
                         "days_remaining": r[3]
                     } for r in rows
                 ]
-
         return jsonify({"status": "success", "users": users})
     except Exception as e:
         print("❌ Error loading users:", e)
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
-# --- Pending payments (now empty, for future use) ---
+# --- Pending payments (empty placeholder) ---
 @app.route("/api/pending_payments")
 def pending_payments():
     if not require_admin(request):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
-    # return empty list instead of demo data
     return jsonify({"status": "success", "payments": []})
 
 # --- Approve payment ---
@@ -193,14 +193,12 @@ def check_license():
 
                 license_key, expiry, days_remaining = row
 
-                # Expired license
                 if time.time() > expiry:
                     return jsonify({
                         "status": "expired",
                         "expires_on": time.strftime("%Y-%m-%d", time.localtime(expiry))
                     })
 
-                # Valid license
                 return jsonify({
                     "status": "valid",
                     "email": email,
@@ -214,6 +212,29 @@ def check_license():
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# --- ✅ NEW: mark_payment_pending (CORS safe) ---
+@app.route("/api/mark_payment_pending", methods=["POST", "OPTIONS"])
+def mark_payment_pending():
+    """
+    Called when frontend starts a payment process.
+    Accepts: {"email": "...", "plan": "..."}
+    """
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
+    data = request.json or {}
+    email = data.get("email")
+    plan = data.get("plan")
+
+    if not email or not plan:
+        return jsonify({"status": "error", "message": "Missing email or plan"}), 400
+
+    try:
+        print(f"💰 Payment pending for {email} ({plan})")
+        return jsonify({"status": "pending", "email": email, "plan": plan}), 200
+    except Exception as e:
+        print("❌ Error marking payment pending:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Serve Admin Dashboard ---
 @app.route("/admin")
@@ -244,15 +265,18 @@ def home():
             "/api/admin/login",
             "/api/all_users",
             "/api/pending_payments",
-            "/api/check_license"
+            "/api/check_license",
+            "/api/mark_payment_pending"
         ]
     })
+
+# --- Reset all license expiries ---
 @app.route("/api/reset_expiry", methods=["GET", "POST"])
 def reset_expiry():
     """Give all licenses a fresh 30-day expiry."""
     try:
         now = int(time.time())
-        new_expiry = now + 30 * 86400  # 30 days from now
+        new_expiry = now + 30 * 86400
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -265,8 +289,7 @@ def reset_expiry():
         print("❌ Error resetting expiry:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- Debug and Maintenance Routes ---
-
+# --- Debug Licenses ---
 @app.route("/api/debug/licenses")
 def debug_licenses():
     """View all current licenses and their remaining days"""
@@ -288,7 +311,7 @@ def debug_licenses():
         print("❌ Error fetching licenses:", e)
         return jsonify({"error": str(e)}), 500
 
-
+# --- Fix days_remaining values ---
 @app.route("/api/fix_days", methods=["POST"])
 def fix_days():
     """Update the days_remaining values in the licenses table"""
@@ -305,16 +328,7 @@ def fix_days():
         print("❌ Error updating days_remaining:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 # --- Start app ---
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000)
-
-
-
-
-
-
-
-
